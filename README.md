@@ -17,3 +17,18 @@ This application is intentionally vulnerable educational material. Run it only o
 The local HTTP setup is for the exercise only. A production deployment requires HTTPS, secure cookies, protected secrets, proper error handling, and additional security controls. Students should document their own fixes and limitations.
 
 The starter includes `api.php`: GET `/api.php?user_id=1` lists notes for an owner, and POST `/api.php` accepts a JSON object with `id`, `title`, and `body` to update a note. These endpoints intentionally lack important protections; use only synthetic data in the isolated lab. Review their behavior and repair them as part of the assignment.
+
+## Repaired version: what changed
+
+- `src/bootstrap.php` – error handling (no displayed errors), secure session start/end.
+- `src/db.php` – PDO connection from environment variables only; no `root` fallback.
+- `src/security.php` – `html()` output encoding, CSRF tokens, input validators, security headers.
+- `src/auth.php` – registration and login (prepared statements, `password_hash`/`password_verify`, session ID rotation, server-assigned role).
+- `src/notes.php` – note queries, all scoped to the signed-in owner.
+- `templates/page.php` – HTML view; every value is escaped.
+- `assets/style.css` – styles moved out of the page so the Content Security Policy can stay strict.
+- `index.php` / `api.php` – thin controllers.
+
+Password migration: the seeded accounts still hold MD5 hashes. On a successful login the app verifies the old MD5 value once and replaces it with an Argon2id (or bcrypt) hash. No manual reset is needed. Remove the legacy MD5 branch in `src/auth.php` once all accounts have signed in.
+
+API usage after the fix: requests need a signed-in session cookie. `POST /api.php` also needs `Content-Type: application/json` and an `X-CSRF-Token` header (the token is in the page's `<meta name="csrf-token">`). `id` must be a JSON integer.

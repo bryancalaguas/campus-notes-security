@@ -1,128 +1,105 @@
 <?php
-session_start();
-ini_set('display_errors', '1');
-error_reporting(E_ALL);
+declare(strict_types=1);
 
-$db = new PDO(
-    'mysql:host=localhost;dbname=notes_lab;charset=utf8mb4',
-    getenv('LAB_DB_USER') ?: 'root',
-    getenv('LAB_DB_PASSWORD') ?: ''
-);
-$db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-$db->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
+require __DIR__ . '/src/bootstrap.php';
 
-$action = $_POST['action'] ?? '';
-if ($action === 'register') {
-    $email = $_POST['email'];
-    $hash = md5($_POST['password']);
-    $role = $_POST['role'];
-    $stmt = $db->prepare('INSERT INTO users (email, password_hash, role) VALUES (?, ?, ?)');
-    $stmt->execute([$email, $hash, $role]);
-    header('Location: /?message=Account created');
+install_error_handler(false);
+start_secure_session();
+send_security_headers();
+
+function flash(string $text): void
+{
+    $_SESSION['flash'] = $text;
+}
+
+function redirect_home(): never
+{
+    header('Location: /', true, 303);
     exit;
 }
 
-if ($action === 'login') {
-    $email = $_POST['email'];
-    $hash = md5($_POST['password']);
-    $sql = "SELECT * FROM users WHERE email = '$email' AND password_hash = '$hash'";
-    $user = $db->query($sql)->fetch();
-    if ($user) {
-        $_SESSION['user_id'] = $user['id'];
-        $_SESSION['role'] = $user['role'];
-        header('Location: /');
-        exit;
+$method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
+$userId = current_user_id();
+
+// Issue 5: every state change must be POST and carry a valid CSRF token.
+if ($method === 'POST') {
+    if (!csrf_valid($_POST['csrf'] ?? null)) {
+        http_response_code(403);
+        exit('Invalid request.');
     }
-    $message = 'Login failed for ' . $email;
+    $action = $_POST['action'] ?? '';
+
+    if ($action === 'register') {
+        $error = register_user($_POST['email'] ?? null, $_POST['password'] ?? null);
+        flash($error ?? 'Account created. You can sign in now.');
+        redirect_home();
+    }
+
+    if ($action === 'login') {
+        if (login_user($_POST['email'] ?? null, $_POST['password'] ?? null)) {
+            redirect_home();
+        }
+        flash('Invalid email or password.');   // generic; never echoes input
+        redirect_home();
+    }
+
+    // Everything below requires a signed-in user.
+    if ($userId === null) {
+        http_response_code(401);
+        exit('Please sign in.');
+    }
+
+    if ($action === 'logout') {
+        end_session();
+        redirect_home();
+    }
+
+    if ($action === 'save' || $action === 'update') {
+        $title = bounded_string($_POST['title'] ?? null, 1, 120);
+        $body  = bounded_string($_POST['body'] ?? null, 1, 5000);
+        if ($title === null || $body === null) {
+            flash('Title (1–120) and body (1–5000 characters) are required.');
+            redirect_home();
+        }
+        if ($action === 'save') {
+            // Issue 7: owner is the session user, not a form field.
+            create_note($userId, $title, $body);
+            flash('Note saved.');
+        } else {
+            $id = positive_int($_POST['id'] ?? null);
+            $ok = $id !== null && update_note($id, $userId, $title, $body);
+            flash($ok ? 'Note updated.' : 'Note not found.');
+        }
+        redirect_home();
+    }
+
+    if ($action === 'delete') {
+        $id = positive_int($_POST['id'] ?? null);
+        $ok = $id !== null && delete_note($id, $userId);
+        flash($ok ? 'Note deleted.' : 'Note not found.');
+        redirect_home();
+    }
+
+    http_response_code(400);
+    exit('Invalid request.');
 }
 
-if ($action === 'save') {
-    $owner = $_POST['user_id'];
-    $title = $_POST['title'];
-    $body = $_POST['body'];
-    $sql = "INSERT INTO notes (user_id, title, body) VALUES ('$owner', '$title', '$body')";
-    $db->exec($sql);
-    header('Location: /');
-    exit;
-}
+// GET: read-only page rendering.
+$message = $_SESSION['flash'] ?? '';
+unset($_SESSION['flash']);
 
-if ($action === 'update') {
-    $id = $_POST['id'];
-    $title = $_POST['title'];
-    $body = $_POST['body'];
-    $stmt = $db->prepare('UPDATE notes SET title = ?, body = ? WHERE id = ?');
-    $stmt->execute([$title, $body, $id]);
-    header('Location: /');
-    exit;
-}
-
-if (isset($_GET['delete'])) {
-    $stmt = $db->prepare('DELETE FROM notes WHERE id = ?');
-    $stmt->execute([$_GET['delete']]);
-    header('Location: /');
-    exit;
-}
-
-if (isset($_GET['logout'])) {
-    unset($_SESSION['user_id']);
-    header('Location: /');
-    exit;
-}
-
-$message = $message ?? ($_GET['message'] ?? '');
 $notes = [];
-$editing = false;
-if (isset($_SESSION['user_id'])) {
-    $notes = $db->query('SELECT id, user_id, title, body FROM notes ORDER BY id DESC')->fetchAll();
+$editing = null;
+if ($userId !== null) {
+    $notes = notes_for_owner($userId);
     if (isset($_GET['edit'])) {
-        $stmt = $db->prepare('SELECT id, title, body FROM notes WHERE id = ?');
-        $stmt->execute([$_GET['edit']]);
-        $editing = $stmt->fetch();
+        $editId = positive_int($_GET['edit']);
+        $editing = $editId !== null ? note_for_owner($editId, $userId) : null;
+        if ($editing === null) {
+            $message = 'Note not found.';
+        }
     }
 }
-?>
-<!doctype html>
-<html lang="en">
-<head><meta charset="utf-8"><title>Campus Notes</title>
-<style>body{font:16px sans-serif;max-width:750px;margin:2rem auto}label{display:block;margin:.5rem 0}article{border:1px solid #aaa;padding:1rem;margin:1rem 0}</style>
-</head>
-<body>
-<h1>Campus Notes</h1>
-<p><?= $message ?></p>
-<?php if (!isset($_SESSION['user_id'])): ?>
-<h2>Register or sign in</h2>
-<form method="post">
-  <label>Email <input name="email" type="email" required></label>
-  <label>Password <input name="password" type="password" required></label>
-  <label>Role <select name="role"><option>student</option><option>admin</option></select></label>
-  <button name="action" value="register">Register</button>
-  <button name="action" value="login">Sign in</button>
-</form>
-<?php else: ?>
-<p>User ID: <?= $_SESSION['user_id'] ?> | Role: <?= $_SESSION['role'] ?> | <a href="?logout=1">Log out</a></p>
-<?php if ($editing): ?>
-<h2>Edit note</h2>
-<form method="post">
-  <input type="hidden" name="id" value="<?= $editing['id'] ?>">
-  <label>Title <input name="title" value="<?= $editing['title'] ?>" required></label>
-  <label>Body <textarea name="body" required><?= $editing['body'] ?></textarea></label>
-  <button name="action" value="update">Update</button>
-  <a href="/">Cancel</a>
-</form>
-<?php endif; ?>
-<h2>Create a note</h2>
-<form method="post">
-  <label>Owner ID <input name="user_id" value="<?= $_SESSION['user_id'] ?>"></label>
-  <label>Title <input name="title" required></label>
-  <label>Body <textarea name="body" required></textarea></label>
-  <button name="action" value="save">Save</button>
-</form>
-<h2>Notes</h2>
-<?php foreach ($notes as $note): ?>
-<article><h3><?= $note['title'] ?></h3><p><?= $note['body'] ?></p>
-<small>Owner: <?= $note['user_id'] ?></small>
-<a href="?edit=<?= $note['id'] ?>">Edit</a>
-<a href="?delete=<?= $note['id'] ?>">Delete</a></article>
-<?php endforeach; ?>
-<?php endif; ?>
-</body></html>
+$csrf = csrf_token();
+
+require __DIR__ . '/templates/page.php';
